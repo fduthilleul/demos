@@ -10,6 +10,10 @@ PULL_IMAGES=false
 # Parse arguments
 if [ "$1" == "--pull" ]; then
     PULL_IMAGES=true
+    echo "⚠️  Warning: Pulling all images may take several minutes depending on your connection..."
+    echo ""
+    # Start timer
+    start_time=$(date +%s)
 fi
 
 # Check for required tools
@@ -34,23 +38,20 @@ else
     exit 1
 fi
 
-echo "Discovering Project Hummingbird images from $REGISTRY/$NAMESPACE..."
-echo ""
-
 # Fetch the list of repositories from Quay.io API
 API_URL="https://quay.io/api/v1/repository?namespace=$NAMESPACE&public=true"
 repos=$(curl -s "$API_URL" | jq -r '.repositories[].name' 2>/dev/null)
 
 if [ -z "$repos" ]; then
     echo "Error: Could not fetch repository list from Quay.io"
-    echo "Falling back to checking locally available images..."
-    $CONTAINER_CMD images --format "{{.Repository}}:{{.Tag}}" | grep "^$REGISTRY/$NAMESPACE/" | sort
-    exit 0
+    exit 1
 fi
+
+# Temporary file to store results
+tmpfile=$(mktemp)
 
 # For each repository, check for common tags
 tags=("latest" "latest-builder")
-count=0
 
 for repo in $repos; do
     for tag in "${tags[@]}"; do
@@ -63,9 +64,8 @@ for repo in $repos; do
             continue
         fi
         
-        # Pull image if requested
+        # Pull image if requested (silently)
         if [ "$PULL_IMAGES" = true ]; then
-            echo "Pulling $image..."
             $CONTAINER_CMD pull "$image" &> /dev/null
         fi
         
@@ -79,25 +79,39 @@ for repo in $repos; do
             else
                 size_mb=$(($size / 1024 / 1024))
             fi
-            printf "%-60s %s MB\n" "$image" "$size_mb"
-            count=$((count + 1))
-        else
-            if [ "$PULL_IMAGES" = false ]; then
-                printf "%-60s Not pulled locally\n" "$image"
-            fi
+            # Store in temp file: size_in_bytes|size_mb|image_name
+            echo "$size|$size_mb|$image" >> "$tmpfile"
         fi
     done
 done
 
-echo ""
-echo "Found $count images locally"
-echo ""
-
-if [ "$PULL_IMAGES" = false ]; then
-    echo "To pull all available images and check their sizes, run:"
-    echo "  $0 --pull"
+# Sort by size (numeric sort on first field) and display
+if [ -s "$tmpfile" ]; then
+    sort -t'|' -n "$tmpfile" | while IFS='|' read -r bytes size_mb image; do
+        printf "%-60s %s MB\n" "$image" "$size_mb"
+    done
+    echo ""
+    echo "Total images: $(wc -l < "$tmpfile")"
+    
+    # Show elapsed time if pulling
+    if [ "$PULL_IMAGES" = true ]; then
+        end_time=$(date +%s)
+        elapsed=$((end_time - start_time))
+        minutes=$((elapsed / 60))
+        seconds=$((elapsed % 60))
+        
+        if [ $minutes -gt 0 ]; then
+            echo "Time taken: ${minutes}m ${seconds}s"
+        else
+            echo "Time taken: ${seconds}s"
+        fi
+    fi
+else
+    echo "No images found locally."
+    if [ "$PULL_IMAGES" = false ]; then
+        echo "Run with --pull flag to download images first."
+    fi
 fi
 
-echo ""
-echo "To pull specific images manually:"
-echo "  $CONTAINER_CMD pull quay.io/hummingbird/<image-name>:latest"
+# Cleanup
+rm -f "$tmpfile"
